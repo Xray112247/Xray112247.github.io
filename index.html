@@ -151,6 +151,95 @@
           <div id="js-content" class="content-ll">
             
   
+    <article id="post-Open-vSwitch-Advanced-Features" class="article article-type-post  article-index" itemscope itemprop="blogPost">
+  <div class="article-inner">
+    
+      <header class="article-header">
+        
+  
+    <h1 itemprop="name">
+      <a class="article-title" href="/2017/08/21/Open-vSwitch-Advanced-Features/">Open vSwitch Advanced Features</a>
+    </h1>
+  
+
+        
+        <a href="/2017/08/21/Open-vSwitch-Advanced-Features/" class="archive-article-date">
+  	<time datetime="2017-08-21T09:26:01.000Z" itemprop="datePublished"><i class="icon-calendar icon"></i>2017-08-21</time>
+</a>
+        
+      </header>
+    
+    <div class="article-entry" itemprop="articleBody">
+      
+        <h2 id="Getting-Started"><a href="#Getting-Started" class="headerlink" title="Getting Started"></a>Getting Started</h2><p>ovs-sandbox，构建基于Open vSwitch的软件模拟网络环境。</p>
+<p>通过实施具有VLAN中继和接入端口的MAC学习交换机来实现。 OpenVlow在Open vSwitch的功能之外，我们将讨论，OpenFlow至少提供了两种实现这种切换的方法：<br>1.一种OpenFlow控制器，以“反应式”的方式实现MAC学习。 每当交换机上出现新的MAC或MAC从一个交换机端口移动到另一个交换机端口时，控制器将调整OpenFlow流表以匹配。<br>2.“正常”动作。 OpenFlow定义了此操作，以将数据包提交到“传统的非OpenFlow管道的交换机”。 也就是说，如果流使用此操作，则流中的数据包将以与在交换机上未配置OpenFlow相同的方式进行交换。</p>
+<h2 id="Scenario"><a href="#Scenario" class="headerlink" title="Scenario"></a>Scenario</h2><p>我们将为具有VLAN的MAC学习交换机构建Open vSwitch流程表，该交换机有四个端口：<br>P1<br>一个在OpenFlow端口1上携带所有VLAN的中继端口。<br>P2<br>OpenFlow端口2上的VLAN 20的接入端口。<br>p3，p4<br>两个用于VLAN 30的访问端口分别在OpenFlow端口3和4上。</p>
+<p>我们的交换机设计将由五个主流表组成，每个流表在交换机管道中实现一个阶段：<br>表0<br>入场控制<br>表1<br>VLAN输入处理。<br>表2<br>学习进入端口的源MAC和VLAN。<br>表3<br>查找目的MAC和VLAN的学习端口。<br>表4<br>输出处理。</p>
+<h2 id="Setup"><a href="#Setup" class="headerlink" title="Setup"></a>Setup</h2><p>启动ovs-sandbox。 在它启动的交互式shell中，运行以下命令：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ ovs-vsctl add-br br0 - <span class="built_in">set</span> Bridge br0 fail-mode = secure</div></pre></td></tr></table></figure></p>
+<p>该命令创建一个新桥“br0”，并将“br0”放入所谓的“故障安全”模式。 为了我们的目的，这只是意味着OpenFlow流表开始为空。</p>
+<p>到目前为止，新桥只有一个端口，“本地端口”br0。 我们需要添加p1，p2，p3和p4。<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div></pre></td><td class="code"><pre><div class="line"><span class="keyword">for</span> i <span class="keyword">in</span> <span class="number">1</span> <span class="number">2</span> <span class="number">3</span> <span class="number">4</span>; <span class="keyword">do</span></div><div class="line"> ovs-vsctl add-port br0 p$i -- set Interface p$i</div><div class="line"> ofport_request=$i ovs-ofctl mod-port br0 p$i up </div><div class="line">done</div></pre></td></tr></table></figure></p>
+<h3 id="Implementing-Table-0-Admission-control"><a href="#Implementing-Table-0-Admission-control" class="headerlink" title="Implementing Table 0: Admission control"></a>Implementing Table 0: Admission control</h3><p>表0是数据包进入交换机的位置。 我们使用这个阶段来丢弃由于某种或另一个原因无效的数据包。 例如，具有组播源地址的数据包是无效的，所以我们可以添加一个流，将它们在入口处丢弃到交换机：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div></pre></td><td class="code"><pre><div class="line">$ ovs-ofctl add-flow br0 \</div><div class="line"> <span class="string">"table=0, dl_src=01:00:00:00:00:00/01:00:00:00:00:00, actions=drop"</span></div></pre></td></tr></table></figure></p>
+<p>交换机也不应转发IEEE 802.1D生成树协议（STP）报文，所以我们还可以添加流量来删除这些和其他具有保留的组播协议的报文：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div></pre></td><td class="code"><pre><div class="line">$ ovs-ofctl add-flow br0 \</div><div class="line"> <span class="string">"table=0, dl_dst=01:80:c2:00:00:00/ff:ff:ff:ff:ff:f0, actions=drop"</span></div></pre></td></tr></table></figure></p>
+<p>我们需要一个更多的流，优先级低于默认值，因此与上面添加的“drop”流不匹配的流将进入OpenFlow表1中的流水线阶段1：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ ovs-ofctl add-flow br0 <span class="string">"table=0, priority=0, actions=resubmit(,1)"</span></div></pre></td></tr></table></figure></p>
+<h3 id="Testing-Table-0"><a href="#Testing-Table-0" class="headerlink" title="Testing Table 0"></a>Testing Table 0</h3><h4 id="Example-1"><a href="#Example-1" class="headerlink" title="Example 1"></a>Example 1</h4><p>测试这条指令：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ ovs-appctl ofproto/trace br0 in_port=1,dl_dst=01:80:c2:00:00:05</div></pre></td></tr></table></figure></p>
+<p>输出：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div></pre></td><td class="code"><pre><div class="line">Flow: in_port=<span class="number">1</span>,vlan_tci=<span class="number">0x0000</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">01</span>:<span class="number">80</span>:c2:<span class="number">00</span>:<span class="number">00</span>:<span class="number">05</span>,dl_type=<span class="number">0x0000</span></div><div class="line"></div><div class="line">bridge(<span class="string">"br0"</span>)</div><div class="line">-------------</div><div class="line"> <span class="number">0.</span> dl_dst=<span class="number">01</span>:<span class="number">80</span>:c2:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/ff:ff:ff:ff:ff:f0, priority <span class="number">32768</span></div><div class="line">    drop</div><div class="line"></div><div class="line">Final flow: unchanged</div><div class="line">Megaflow: recirc_id=<span class="number">0</span>,in_port=<span class="number">1</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/<span class="number">01</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">01</span>:<span class="number">80</span>:c2:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/ff:ff:ff:ff:ff:f0,dl_type=<span class="number">0x0000</span></div><div class="line">Datapath actions: drop</div></pre></td></tr></table></figure></p>
+<p>第一行显示正在跟踪的流程，稍微比命令行上指定的更详细。 它主要是零，因为未指定的字段默认为零。<br>第二组线路显示通过桥梁br0的包的行程。 我们在表0中看到，字段匹配的OpenFlow流及其优先级，后跟其动作，每行一个。 在这种情况下，我们看到具有保留的组播目的地址的数据包与丢弃这些数据包的流量相匹配。<br>最后一行总结了结果。</p>
+<h4 id="Example-2"><a href="#Example-2" class="headerlink" title="Example 2"></a>Example 2</h4><p>测试另一条指令：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ ovs-appctl ofproto/trace br0 in_port=1,dl_dst=01:80:c2:00:00:10</div></pre></td></tr></table></figure></p>
+<p>输出：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div></pre></td><td class="code"><pre><div class="line">Flow: in_port=<span class="number">1</span>,vlan_tci=<span class="number">0x0000</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">01</span>:<span class="number">80</span>:c2:<span class="number">00</span>:<span class="number">00</span>:<span class="number">10</span>,dl_type=<span class="number">0x0000</span></div><div class="line"></div><div class="line">bridge(<span class="string">"br0"</span>)</div><div class="line">-------------</div><div class="line"> <span class="number">0.</span> priority <span class="number">0</span></div><div class="line">    resubmit(,<span class="number">1</span>)</div><div class="line"> <span class="number">1.</span> No match.</div><div class="line">    drop</div><div class="line"></div><div class="line">Final flow: unchanged</div><div class="line">Megaflow: recirc_id=<span class="number">0</span>,in_port=<span class="number">1</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/<span class="number">01</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">01</span>:<span class="number">80</span>:c2:<span class="number">00</span>:<span class="number">00</span>:<span class="number">10</span>/ff:ff:ff:ff:ff:f0,dl_type=<span class="number">0x0000</span></div><div class="line">Datapath actions: drop</div></pre></td></tr></table></figure></p>
+<p>这一次，我们传递给proto / trace的流不与表0中的任何“drop”流相符，所以它落在了低优先级的“重新提交”流中。 “重新提交”导致在OpenFlow表1中进行第二次查找，由以“1”开头的文本块描述。我们还没有向OpenFlow表1添加任何流，因此在第二次查找中没有流量实际匹配。 因此，分组仍然实际上被丢弃，这意味着外部可观察到的结果将与我们的第一个例子相同。</p>
+<h2 id="Implementing-Table-1-VLAN-Input-Processing"><a href="#Implementing-Table-1-VLAN-Input-Processing" class="headerlink" title="Implementing Table 1: VLAN Input Processing"></a>Implementing Table 1: VLAN Input Processing</h2><p>进入表1的数据包已经通过表0中的基本验证。表1的目的是根据数据包进入交换机的交换机端口的VLAN配置来验证数据包的VLAN。 我们还将使用它将VLAN标头附加到到达访问端口的数据包，这允许后续处理阶段依赖于始终作为VLAN标头一部分的数据包的VLAN，从而减少了特殊情况。</p>
+<p>我们首先添加一个丢弃所有数据包的低优先级流，然后再添加通过可接受数据包的流。 您可以将其视为“默认丢弃”流程：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ ovs-ofctl add-flow br0 <span class="string">"table=1, priority=0, actions=drop"</span></div></pre></td></tr></table></figure></p>
+<p>我们在OpenFlow端口1上的中继端口p1是一个简单的例子。 p1接受任何数据包，无论它是否有VLAN头或VLAN是什么，因此我们可以添加一个流，将输入端口1上的所有内容重新提交到下一个表：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div></pre></td><td class="code"><pre><div class="line">$ ovs-ofctl add-flow br0 \</div><div class="line"><span class="string">"table=1, priority=99, in_port=1, actions=resubmit(,2)"</span></div></pre></td></tr></table></figure></p>
+<p>在接入端口上，我们要接受任何没有VLAN头的数据包，使用接入端口的VLAN号对其进行标记，然后将其传递给下一个阶段：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div></pre></td><td class="code"><pre><div class="line">$ ovs-ofctl add-flows br0 - &lt;&lt;<span class="string">'EOF'</span></div><div class="line">table=1, priority=99, in_port=2, vlan_tci=0, actions=mod_vlan_vid:20, resubmit(,2)</div><div class="line">table=1, priority=99, in_port=3, vlan_tci=0, actions=mod_vlan_vid:30, resubmit(,2)</div><div class="line">table=1, priority=99, in_port=4, vlan_tci=0, actions=mod_vlan_vid:30, resubmit(,2)</div><div class="line">EOF</div></pre></td></tr></table></figure></p>
+<p>我们不会在任何访问端口上写入与进入此阶段的802.1Q数据包相匹配的流，因此我们之前添加的“默认丢弃”流程会导致它们被丢弃，这通常是我们想要的接入端口。</p>
+<h3 id="Testing-Table-1"><a href="#Testing-Table-1" class="headerlink" title="Testing Table 1"></a>Testing Table 1</h3><h4 id="Example-1-Packet-on-Trunk-Port"><a href="#Example-1-Packet-on-Trunk-Port" class="headerlink" title="Example 1: Packet on Trunk Port"></a>Example 1: Packet on Trunk Port</h4><p>这是一个测试中继端口上的数据包：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ ovs-appctl ofproto/trace br0 in_port=1,vlan_tci=5</div></pre></td></tr></table></figure></p>
+<p>输出显示表0中的查找，重新提交到表1，并重新提交到表2（由于我们还没有放在任何地方，因此没有执行任何操作）：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div></pre></td><td class="code"><pre><div class="line">Flow: in_port=<span class="number">1</span>,vlan_tci=<span class="number">0x0005</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_type=<span class="number">0x0000</span></div><div class="line"></div><div class="line">bridge(<span class="string">"br0"</span>)</div><div class="line">-------------</div><div class="line"> <span class="number">0.</span> priority <span class="number">0</span></div><div class="line">    resubmit(,<span class="number">1</span>)</div><div class="line"> <span class="number">1.</span> in_port=<span class="number">1</span>, priority <span class="number">99</span></div><div class="line">    resubmit(,<span class="number">2</span>)</div><div class="line"> <span class="number">2.</span> No match.</div><div class="line">    drop</div><div class="line"></div><div class="line">Final flow: unchanged</div><div class="line">Megaflow: recirc_id=<span class="number">0</span>,in_port=<span class="number">1</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/<span class="number">01</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/ff:ff:ff:ff:ff:f0,dl_type=<span class="number">0x0000</span></div><div class="line">Datapath actions: drop</div></pre></td></tr></table></figure></p>
+<h4 id="Example-2-Valid-Packet-on-Access-Port"><a href="#Example-2-Valid-Packet-on-Access-Port" class="headerlink" title="Example 2: Valid Packet on Access Port"></a>Example 2: Valid Packet on Access Port</h4><p>这是对进入端口p2的有效数据包（没有802.1Q头的数据包）的测试：<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ ovs-appctl ofproto/trace br0 in_port=2</div></pre></td></tr></table></figure></p>
+<p>输出与之前的情况类似，只是它在p2的VLAN20附加标签之前，将其传递给表2：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div><div class="line">13</div><div class="line">14</div><div class="line">15</div></pre></td><td class="code"><pre><div class="line">Flow: in_port=<span class="number">2</span>,vlan_tci=<span class="number">0x0000</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_type=<span class="number">0x0000</span></div><div class="line"></div><div class="line">bridge(<span class="string">"br0"</span>)</div><div class="line">-------------</div><div class="line"> <span class="number">0.</span> priority <span class="number">0</span></div><div class="line">    resubmit(,<span class="number">1</span>)</div><div class="line"> <span class="number">1.</span> in_port=<span class="number">2</span>,vlan_tci=<span class="number">0x0000</span>, priority <span class="number">99</span></div><div class="line">    mod_vlan_vid:<span class="number">20</span></div><div class="line">    resubmit(,<span class="number">2</span>)</div><div class="line"> <span class="number">2.</span> No match.</div><div class="line">    drop</div><div class="line"></div><div class="line">Final flow: in_port=<span class="number">2</span>,dl_vlan=<span class="number">20</span>,dl_vlan_pcp=<span class="number">0</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_type=<span class="number">0x0000</span></div><div class="line">Megaflow: recirc_id=<span class="number">0</span>,in_port=<span class="number">2</span>,vlan_tci=<span class="number">0x0000</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/<span class="number">01</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/ff:ff:ff:ff:ff:f0,dl_type=<span class="number">0x0000</span></div><div class="line">Datapath actions: drop</div></pre></td></tr></table></figure></p>
+<h4 id="Example-3-Invalid-Packet-on-Access-Port"><a href="#Example-3-Invalid-Packet-on-Access-Port" class="headerlink" title="Example 3: Invalid Packet on Access Port"></a>Example 3: Invalid Packet on Access Port</h4><p>这测试进入访问端口p2的无效数据包（包括802.1Q头）<br><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ ovs-appctl ofproto/trace br0 in_port=2,vlan_tci=5</div></pre></td></tr></table></figure></p>
+<p>输出显示与默认丢弃流匹配的数据包：<br><figure class="highlight javascript"><table><tr><td class="gutter"><pre><div class="line">1</div><div class="line">2</div><div class="line">3</div><div class="line">4</div><div class="line">5</div><div class="line">6</div><div class="line">7</div><div class="line">8</div><div class="line">9</div><div class="line">10</div><div class="line">11</div><div class="line">12</div></pre></td><td class="code"><pre><div class="line">Flow: in_port=<span class="number">2</span>,vlan_tci=<span class="number">0x0005</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_type=<span class="number">0x0000</span></div><div class="line"></div><div class="line">bridge(<span class="string">"br0"</span>)</div><div class="line">-------------</div><div class="line"> <span class="number">0.</span> priority <span class="number">0</span></div><div class="line">    resubmit(,<span class="number">1</span>)</div><div class="line"> <span class="number">1.</span> priority <span class="number">0</span></div><div class="line">    drop</div><div class="line"></div><div class="line">Final flow: unchanged</div><div class="line">Megaflow: recirc_id=<span class="number">0</span>,in_port=<span class="number">2</span>,vlan_tci=<span class="number">0x0005</span>,dl_src=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/<span class="number">01</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>,dl_dst=<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>:<span class="number">00</span>/ff:ff:ff:ff:ff:f0,dl_type=<span class="number">0x0000</span></div><div class="line">Datapath actions: drop</div></pre></td></tr></table></figure></p>
+
+      
+
+      
+    </div>
+    <div class="article-info article-info-index">
+      
+      
+      
+
+      
+        <p class="article-more-link">
+          <a class="article-more-a" href="/2017/08/21/Open-vSwitch-Advanced-Features/">展开全文 >></a>
+        </p>
+      
+
+      
+      <div class="clearfix"></div>
+    </div>
+  </div>
+</article>
+
+<aside class="wrap-side-operation">
+    <div class="mod-side-operation">
+        
+        <div class="jump-container" id="js-jump-container" style="display:none;">
+            <a href="javascript:void(0)" class="mod-side-operation__jump-to-top">
+                <i class="icon-font icon-back"></i>
+            </a>
+            <div id="js-jump-plan-container" class="jump-plan-container" style="top: -11px;">
+                <i class="icon-font icon-plane jump-plane"></i>
+            </div>
+        </div>
+        
+        
+    </div>
+</aside>
+
+
+
+
+  
     <article id="post-Install-OVS" class="article article-type-post  article-index" itemscope itemprop="blogPost">
   <div class="article-inner">
     
@@ -258,77 +347,6 @@
       
         <p class="article-more-link">
           <a class="article-more-a" href="/2017/08/15/我的第一篇Blog/">展开全文 >></a>
-        </p>
-      
-
-      
-      <div class="clearfix"></div>
-    </div>
-  </div>
-</article>
-
-<aside class="wrap-side-operation">
-    <div class="mod-side-operation">
-        
-        <div class="jump-container" id="js-jump-container" style="display:none;">
-            <a href="javascript:void(0)" class="mod-side-operation__jump-to-top">
-                <i class="icon-font icon-back"></i>
-            </a>
-            <div id="js-jump-plan-container" class="jump-plan-container" style="top: -11px;">
-                <i class="icon-font icon-plane jump-plane"></i>
-            </div>
-        </div>
-        
-        
-    </div>
-</aside>
-
-
-
-
-  
-    <article id="post-hello-world" class="article article-type-post  article-index" itemscope itemprop="blogPost">
-  <div class="article-inner">
-    
-      <header class="article-header">
-        
-  
-    <h1 itemprop="name">
-      <a class="article-title" href="/2017/08/15/hello-world/">Hello World</a>
-    </h1>
-  
-
-        
-        <a href="/2017/08/15/hello-world/" class="archive-article-date">
-  	<time datetime="2017-08-15T02:45:26.619Z" itemprop="datePublished"><i class="icon-calendar icon"></i>2017-08-15</time>
-</a>
-        
-      </header>
-    
-    <div class="article-entry" itemprop="articleBody">
-      
-        <p>Welcome to <a href="https://hexo.io/" target="_blank" rel="external">Hexo</a>! This is your very first post. Check <a href="https://hexo.io/docs/" target="_blank" rel="external">documentation</a> for more info. If you get any problems when using Hexo, you can find the answer in <a href="https://hexo.io/docs/troubleshooting.html" target="_blank" rel="external">troubleshooting</a> or you can ask me on <a href="https://github.com/hexojs/hexo/issues" target="_blank" rel="external">GitHub</a>.</p>
-<h2 id="Quick-Start"><a href="#Quick-Start" class="headerlink" title="Quick Start"></a>Quick Start</h2><h3 id="Create-a-new-post"><a href="#Create-a-new-post" class="headerlink" title="Create a new post"></a>Create a new post</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ hexo new <span class="string">"My New Post"</span></div></pre></td></tr></table></figure>
-<p>More info: <a href="https://hexo.io/docs/writing.html" target="_blank" rel="external">Writing</a></p>
-<h3 id="Run-server"><a href="#Run-server" class="headerlink" title="Run server"></a>Run server</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ hexo server</div></pre></td></tr></table></figure>
-<p>More info: <a href="https://hexo.io/docs/server.html" target="_blank" rel="external">Server</a></p>
-<h3 id="Generate-static-files"><a href="#Generate-static-files" class="headerlink" title="Generate static files"></a>Generate static files</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ hexo generate</div></pre></td></tr></table></figure>
-<p>More info: <a href="https://hexo.io/docs/generating.html" target="_blank" rel="external">Generating</a></p>
-<h3 id="Deploy-to-remote-sites"><a href="#Deploy-to-remote-sites" class="headerlink" title="Deploy to remote sites"></a>Deploy to remote sites</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><div class="line">1</div></pre></td><td class="code"><pre><div class="line">$ hexo deploy</div></pre></td></tr></table></figure>
-<p>More info: <a href="https://hexo.io/docs/deployment.html" target="_blank" rel="external">Deployment</a></p>
-
-      
-
-      
-    </div>
-    <div class="article-info article-info-index">
-      
-      
-      
-
-      
-        <p class="article-more-link">
-          <a class="article-more-a" href="/2017/08/15/hello-world/">展开全文 >></a>
         </p>
       
 
